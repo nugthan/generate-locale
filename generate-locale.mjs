@@ -70,6 +70,16 @@ function setDeep(obj, key, value) {
     }
 }
 
+// NEW: load existing yaml if present
+function loadExistingYamlIfAny(filepath) {
+    if (!fs.existsSync(filepath)) return {};
+    const raw = fs.readFileSync(filepath, "utf8");
+    if (isBlank(raw)) return {};
+    const parsed = YAML.parse(raw);
+    // YAML.parse can return null for empty docs
+    return parsed ?? {};
+}
+
 const args = process.argv.slice(2);
 function getArg(name, fallback = null) {
     const idx = args.indexOf(`--${name}`);
@@ -89,7 +99,6 @@ if (!xlsxPath) {
 }
 
 // read the spreadsheet
-
 fs.mkdirSync(outDir, { recursive: true });
 
 const wb = XLSX.readFile(xlsxPath, { cellDates: false });
@@ -118,11 +127,17 @@ function localeHeaderToCode(h) {
     return String(h).replace(locPrefixRe, "").trim();
 }
 
+// Prepare outputs by loading existing YAML (if it exists)
 const outputs = {};
-for (const col of localeCols) outputs[col] = {};
+for (const col of localeCols) {
+    const code = localeHeaderToCode(col);
+    const filename = code.toLowerCase().replace(/\s+/g, "-");
+    const outPath = path.join(outDir, `${filename}.yaml`);
 
-// Create the translations
+    outputs[col] = loadExistingYamlIfAny(outPath);
+}
 
+// Create the translations (merge into loaded objects)
 const warnings = [];
 
 for (let i = 0; i < rows.length; i++) {
@@ -145,7 +160,6 @@ for (let i = 0; i < rows.length; i++) {
 }
 
 // Write the files
-
 for (const col of localeCols) {
     const code = localeHeaderToCode(col);
     const filename = code.toLowerCase().replace(/\s+/g, "-");
@@ -159,7 +173,6 @@ for (const col of localeCols) {
 }
 
 // Summary
-
 console.log("\nLocales generated:");
 for (const col of localeCols) {
     console.log(` - ${localeHeaderToCode(col)}`);
