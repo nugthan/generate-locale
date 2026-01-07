@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 /**
- * Turn your spreadsheet into a yaml file!
+ * Turn your spreadsheet into a locale file!
  *
  * Usage:
  *   node generate-locales.mjs --xlsx "translations.xlsx" --out "./locales"
  *
  * Optional:
- *   --sheet "Sheet1" (default: first sheet)
- *   --key-col "Key" // default key column name
- *   --loc-prefix "loc:" // default locale column prefix
- *
- * New:
- *   --ref "./en-us.yaml" // reference yaml to provide structure
- *   --missing "blank"    // default. adds missing keys with ""
- *   --missing "ref"      // adds missing keys by copying reference values
+ *   --sheet "Sheet1"        (default: first sheet)
+ *   --key-col "Key"         (default key column name)
+ *   --loc-prefix "loc:"     (default locale column prefix)
+ *   --ref "./en-us.yaml"    (reference yaml for structure)
+ *   --missing blank|ref     (how to fill missing keys from ref)
+ *   --ext "yaml"            (file extension, default: yaml)
  */
 
 import fs from "node:fs";
@@ -75,74 +73,9 @@ function setDeep(obj, key, value) {
     }
 }
 
-// NEW: ref merge helpers
+// Reference merge helpers
 function isObject(v) {
     return v != null && typeof v === "object" && !Array.isArray(v);
-}
-
-/**
- * Fill missing structure from ref into target.
- * - Keeps existing target values.
- * - Adds missing keys/array elements.
- * - For leaf values:
- *    mode "blank": ""
- *    mode "ref":   copy ref leaf
- */
-function fillMissingFromRef(target, ref, mode) {
-    if (Array.isArray(ref)) {
-        if (!Array.isArray(target)) {
-            // If target isn't an array but ref is, replace with array structure.
-            // This only happens if target was missing or wrong-type.
-            target = [];
-        }
-
-        for (let i = 0; i < ref.length; i++) {
-            const refVal = ref[i];
-
-            if (target[i] === undefined) {
-                // create missing element
-                target[i] = createFromRef(refVal, mode);
-            } else {
-                // merge deeper if needed
-                if (isObject(refVal) && isObject(target[i])) {
-                    fillMissingFromRef(target[i], refVal, mode);
-                } else if (Array.isArray(refVal) && Array.isArray(target[i])) {
-                    fillMissingFromRef(target[i], refVal, mode);
-                }
-                // if leaf exists, keep target leaf as-is
-            }
-        }
-
-        return target;
-    }
-
-    if (isObject(ref)) {
-        if (!isObject(target)) {
-            target = {};
-        }
-
-        for (const k of Object.keys(ref)) {
-            const refVal = ref[k];
-
-            if (!(k in target) || target[k] === undefined) {
-                target[k] = createFromRef(refVal, mode);
-            } else {
-                const tgtVal = target[k];
-
-                if (isObject(refVal) && isObject(tgtVal)) {
-                    fillMissingFromRef(tgtVal, refVal, mode);
-                } else if (Array.isArray(refVal) && Array.isArray(tgtVal)) {
-                    fillMissingFromRef(tgtVal, refVal, mode);
-                }
-                // if leaf exists, keep target leaf as-is
-            }
-        }
-
-        return target;
-    }
-
-    // ref is a leaf; nothing to merge into existing leaf
-    return target;
 }
 
 function createFromRef(refVal, mode) {
@@ -156,11 +89,38 @@ function createFromRef(refVal, mode) {
         }
         return out;
     }
-    // leaf
-    if (mode === "ref") return refVal;
-    return ""; // blank
+    return mode === "ref" ? refVal : "";
 }
 
+function fillMissingFromRef(target, ref, mode) {
+    if (Array.isArray(ref)) {
+        if (!Array.isArray(target)) target = [];
+        for (let i = 0; i < ref.length; i++) {
+            if (target[i] === undefined) {
+                target[i] = createFromRef(ref[i], mode);
+            } else {
+                fillMissingFromRef(target[i], ref[i], mode);
+            }
+        }
+        return target;
+    }
+
+    if (isObject(ref)) {
+        if (!isObject(target)) target = {};
+        for (const k of Object.keys(ref)) {
+            if (!(k in target)) {
+                target[k] = createFromRef(ref[k], mode);
+            } else {
+                fillMissingFromRef(target[k], ref[k], mode);
+            }
+        }
+        return target;
+    }
+
+    return target;
+}
+
+// CLI args
 const args = process.argv.slice(2);
 function getArg(name, fallback = null) {
     const idx = args.indexOf(`--${name}`);
@@ -173,21 +133,21 @@ const outDir = getArg("out", "./locales");
 const sheetName = getArg("sheet", null);
 const keyColName = getArg("key-col", "Key");
 const locPrefix = getArg("loc-prefix", "loc:");
-
 const refPath = getArg("ref", null);
 const missingMode = (getArg("missing", "blank") || "blank").toLowerCase();
+const fileExt = (getArg("ext", "yaml") || "yaml").replace(/^\./, "");
 
 if (!xlsxPath) {
     console.error('Usage: node generate-locales.mjs --xlsx "file.xlsx" --out "./locales"');
     process.exit(1);
 }
 
-if (missingMode !== "blank" && missingMode !== "ref") {
-    console.error('Invalid --missing value. Use: --missing "blank" or --missing "ref"');
+if (!["blank", "ref"].includes(missingMode)) {
+    console.error('Invalid --missing value. Use "blank" or "ref"');
     process.exit(1);
 }
 
-// read the spreadsheet
+// Read spreadsheet
 fs.mkdirSync(outDir, { recursive: true });
 
 const wb = XLSX.readFile(xlsxPath, { cellDates: false });
@@ -204,38 +164,28 @@ const locPrefixRe = new RegExp(
     "i"
 );
 
-// Get all the columns prefixed with loc:
+// Locale columns
 const localeCols = headers.filter(h => locPrefixRe.test(h));
 if (localeCols.length === 0) {
-    throw new Error(
-        `No locale columns found. Add headers like "${locPrefix}EN-US", "${locPrefix}FR-FR".`
-    );
+    throw new Error(`No locale columns found. Use headers like "${locPrefix}EN-US"`);
 }
 
 function localeHeaderToCode(h) {
     return String(h).replace(locPrefixRe, "").trim();
 }
 
-// Load reference YAML if provided
+// Load reference yaml
 let refObj = null;
 if (refPath) {
-    if (!fs.existsSync(refPath)) {
-        throw new Error(`Reference file not found: ${refPath}`);
-    }
     const raw = fs.readFileSync(refPath, "utf8");
     refObj = YAML.parse(raw) ?? {};
-    if (!isObject(refObj) && !Array.isArray(refObj)) {
-        // allow weird root, but normalize
-        refObj = refObj ?? {};
-    }
 }
 
+// Build outputs
 const outputs = {};
 for (const col of localeCols) outputs[col] = {};
 
-// Create the translations
-const warnings = [];
-
+// Apply spreadsheet values
 for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const keys = splitMultiKey(r[keyColName]);
@@ -245,34 +195,23 @@ for (let i = 0; i < rows.length; i++) {
         for (const col of localeCols) {
             const raw = r[col];
             if (isBlank(raw)) continue;
-
-            try {
-                setDeep(outputs[col], key, String(raw));
-            } catch (e) {
-                warnings.push(`Row ${i + 2} col "${col}" key "${key}": ${e.message}`);
-            }
+            setDeep(outputs[col], key, String(raw));
         }
     }
 }
 
-// NEW: merge missing structure from reference into each locale output
-if (refObj != null) {
+// Merge reference structure
+if (refObj) {
     for (const col of localeCols) {
-        try {
-            // Fill missing keys in-place
-            const merged = fillMissingFromRef(outputs[col], refObj, missingMode);
-            outputs[col] = merged;
-        } catch (e) {
-            warnings.push(`Ref merge failed for "${col}": ${e.message}`);
-        }
+        outputs[col] = fillMissingFromRef(outputs[col], refObj, missingMode);
     }
 }
 
-// Write the files
+// Write files
 for (const col of localeCols) {
     const code = localeHeaderToCode(col);
     const filename = code.toLowerCase().replace(/\s+/g, "-");
-    const outPath = path.join(outDir, `${filename}.yaml`);
+    const outPath = path.join(outDir, `${filename}.${fileExt}`);
 
     const doc = new YAML.Document(outputs[col]);
     if (doc.contents) doc.contents.commentBefore = "Generated from spreadsheet.";
@@ -285,14 +224,4 @@ for (const col of localeCols) {
 console.log("\nLocales generated:");
 for (const col of localeCols) {
     console.log(` - ${localeHeaderToCode(col)}`);
-}
-
-if (refObj != null) {
-    console.log(`\nReference structure merged from: ${refPath}`);
-    console.log(`Missing fill mode: ${missingMode}`);
-}
-
-if (warnings.length) {
-    console.log("\nWarnings:");
-    for (const w of warnings) console.log(" -", w);
 }
